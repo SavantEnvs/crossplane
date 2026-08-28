@@ -1,0 +1,122 @@
+// mayhem/harness_dag.go.src — native testing.F harness for crossplane's package
+// dependency DAG (internal/dag). Staged by mayhem/build.sh into a fresh
+// STANDALONE Go mini-module (_mayhem_harness/dag) that holds a verbatim copy of
+// internal/dag/dag.go (with its ONE non-stdlib import — crossplane-runtime's
+// errors helper — repointed to a tiny local shim), so go-118-fuzz-build builds
+// the real MapDag graph algorithm WITHOUT dragging in crossplane's giant
+// Kubernetes go.mod closure (api-machinery + controller-runtime + client-go).
+//
+// Declared `package dag` (the directory's package) so it reaches the real
+// NewMapDag / Init / Sort / TraceNode / AddEdge code paths directly —
+// go-118-fuzz-build rewrites this into an ordinary non-test .go file.
+//
+// Byte-in, NO file I/O (netnew §3): the fuzzer's bytes are parsed into a set of
+// nodes and edges (a tiny line-oriented grammar), then driven through the whole
+// DAG surface — topological Sort() (which does cycle detection) must never
+// panic on any graph, cyclic or not. Starter seeds are Mayhem's job via the
+// Mayhemfile testsuite: directive. This mirrors upstream's own FuzzDag in
+// internal/dag/fuzz_test.go, but self-parses bytes rather than pulling
+// go-fuzz-headers into the harness source.
+package dag
+
+import (
+	"strings"
+	"testing"
+)
+
+// fuzzNode is a minimal dag.Node implementation for the fuzzer. Neighbors are
+// stored as a stable slice so Neighbors() is deterministic per node.
+type fuzzNode struct {
+	id       string
+	neighbor []*fuzzNode
+}
+
+func (n *fuzzNode) Identifier() string { return n.id }
+
+func (n *fuzzNode) Neighbors() []Node {
+	out := make([]Node, len(n.neighbor))
+	for i, x := range n.neighbor {
+		out[i] = x
+	}
+	return out
+}
+
+func (n *fuzzNode) AddNeighbors(nodes ...Node) error {
+	for _, x := range nodes {
+		fn, ok := x.(*fuzzNode)
+		if !ok {
+			// Mirror simpleNode: reject foreign node types.
+			continue
+		}
+		n.neighbor = append(n.neighbor, fn)
+	}
+	return nil
+}
+
+func (n *fuzzNode) GetConstraints() string         { return "" }
+func (n *fuzzNode) GetParentConstraints() []string { return nil }
+func (n *fuzzNode) AddParentConstraints([]string)  {}
+
+// FuzzDag parses the input into a graph and exercises the full MapDag surface.
+// Grammar (one directive per line):
+//
+//	"A>B"   edge: node A depends on node B (both implied if new)
+//	"A"     bare node
+//
+// The first token of the WHOLE input (before the first newline, if it contains
+// no '>') is reused as the identifier passed to TraceNode / NodeNeighbors so the
+// fuzzer can steer those lookups too.
+func FuzzDag(f *testing.F) {
+	f.Add([]byte("A>B\nB>C\nA>C\n"))
+	f.Add([]byte("x>y\ny>x\n")) // a cycle — Sort must return an error, not panic
+	f.Add([]byte("lonely\n"))
+	f.Add([]byte(""))
+
+	f.Fuzz(func(_ *testing.T, data []byte) {
+		reg := map[string]*fuzzNode{}
+		get := func(id string) *fuzzNode {
+			if n, ok := reg[id]; ok {
+				return n
+			}
+			n := &fuzzNode{id: id}
+			reg[id] = n
+			return n
+		}
+
+		var query string
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimRight(line, "\r")
+			if line == "" {
+				continue
+			}
+			if query == "" {
+				query = line
+			}
+			if i := strings.IndexByte(line, '>'); i >= 0 {
+				from := get(line[:i])
+				to := get(line[i+1:])
+				_ = from.AddNeighbors(to)
+			} else {
+				get(line)
+			}
+		}
+
+		nodes := make([]Node, 0, len(reg))
+		for _, n := range reg {
+			nodes = append(nodes, n)
+		}
+
+		d := NewMapDag()
+		if _, err := d.Init(nodes); err != nil {
+			return
+		}
+
+		_, _ = d.Sort()
+		_, _ = d.TraceNode(query)
+		_, _ = d.NodeNeighbors(query)
+		_ = d.NodeExists(query)
+		_, _ = d.GetNode(query)
+		_, _ = d.AddEdge(query, &fuzzNode{id: query + "-x"})
+		_, _ = d.Sort()
+	})
+}
