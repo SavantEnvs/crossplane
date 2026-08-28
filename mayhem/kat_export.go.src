@@ -1,0 +1,92 @@
+// mayhem/kat_export.go.src — known-answer harness for crossplane's package
+// dependency DAG, exported so the dynamically-linked KAT probe (mayhem/kat) can
+// assert exact behavioral values. Staged by mayhem/build.sh into the
+// _mayhem_harness/dag mini-module alongside the verbatim copy of
+// internal/dag/dag.go, so it reaches the REAL NewMapDag/Init/Sort/TraceNode code
+// path — the same path the fuzz harness exercises.
+//
+// This is the BEHAVIORAL oracle's engine. Every expected value is a documented
+// property of the algorithm and matches internal/dag/dag_test.go semantics:
+//   - a total-order chain has a UNIQUE topological sort (post-order),
+//   - a cyclic graph makes Sort() return a "detected cycle" error,
+//   - TraceNode() returns exactly the transitive neighbour set.
+// When the program is neutered (LD_PRELOAD _exit(0)) the probe prints nothing,
+// every assertion in test.sh misses, and the oracle FAILS — which is the point.
+package dag
+
+import (
+	"sort"
+	"strings"
+)
+
+type katNode struct {
+	id       string
+	neighbor []*katNode
+}
+
+func (n *katNode) Identifier() string { return n.id }
+func (n *katNode) Neighbors() []Node {
+	out := make([]Node, len(n.neighbor))
+	for i, x := range n.neighbor {
+		out[i] = x
+	}
+	return out
+}
+func (n *katNode) AddNeighbors(nodes ...Node) error {
+	for _, x := range nodes {
+		if fn, ok := x.(*katNode); ok {
+			n.neighbor = append(n.neighbor, fn)
+		}
+	}
+	return nil
+}
+func (n *katNode) GetConstraints() string         { return "" }
+func (n *katNode) GetParentConstraints() []string { return nil }
+func (n *katNode) AddParentConstraints([]string)  {}
+
+// KAT holds the known-answer results computed through the real dag code.
+type KAT struct {
+	ChainSort  string // topological sort of a chain, joined by ","
+	CycleErr   string // Sort() error string for a cyclic graph ("" if none)
+	TraceCount int    // number of transitive neighbours of the chain head
+	TraceKeys  string // sorted transitive neighbour identifiers, joined by ","
+}
+
+// KATRun computes the oracle values through the real MapDag implementation.
+func KATRun() KAT {
+	out := KAT{}
+
+	// Chain: one -> two -> three (one depends on two depends on three).
+	// Post-order topological sort is the unique order [three, two, one].
+	three := &katNode{id: "three"}
+	two := &katNode{id: "two", neighbor: []*katNode{three}}
+	one := &katNode{id: "one", neighbor: []*katNode{two}}
+	chain := NewMapDag()
+	if _, err := chain.Init([]Node{one, two, three}); err == nil {
+		if order, err := chain.Sort(); err == nil {
+			out.ChainSort = strings.Join(order, ",")
+		}
+		if tree, err := chain.TraceNode("one"); err == nil {
+			out.TraceCount = len(tree)
+			keys := make([]string, 0, len(tree))
+			for k := range tree {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			out.TraceKeys = strings.Join(keys, ",")
+		}
+	}
+
+	// Cycle: a -> b -> a. Sort() must report a detected cycle.
+	b := &katNode{id: "b"}
+	a := &katNode{id: "a", neighbor: []*katNode{b}}
+	b.neighbor = []*katNode{a}
+	cyc := NewMapDag()
+	if _, err := cyc.Init([]Node{a, b}); err == nil {
+		if _, err := cyc.Sort(); err != nil {
+			out.CycleErr = err.Error()
+		}
+	}
+
+	return out
+}

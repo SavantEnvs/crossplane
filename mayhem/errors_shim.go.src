@@ -1,0 +1,22 @@
+// mayhem/errors_shim.go.src — a tiny stdlib-only stand-in for
+// github.com/crossplane/crossplane-runtime/v2/pkg/errors, staged by
+// mayhem/build.sh into the _mayhem_harness/dag mini-module at errors/errors.go.
+//
+// WHY: internal/dag/dag.go's ONLY non-stdlib import is crossplane-runtime's
+// errors helper, and it uses just two symbols — errors.New and errors.Errorf.
+// The real package pulls k8s.io/apimachinery + controller-runtime, which would
+// drag crossplane's entire Kubernetes closure into the mini-module and defeat
+// the point of isolating a dependency-light surface. These two shims are
+// behaviorally identical for dag.go's use (New wraps a message, Errorf formats),
+// so the fuzzed algorithm AND the oracle's "detected cycle on: X" message are
+// exactly what upstream produces. The build.sh sed only repoints dag.go's import
+// path at this shim; dag.go itself is copied verbatim.
+package errors
+
+import "fmt"
+
+// New returns an error with the supplied message (stdlib errors.New semantics).
+func New(message string) error { return fmt.Errorf("%s", message) }
+
+// Errorf formats according to a format specifier and returns the error.
+func Errorf(format string, args ...any) error { return fmt.Errorf(format, args...) }

@@ -1,0 +1,8 @@
+project: savantenvs/crossplane
+target: fuzz_dag
+testsuite:
+  - https://$MAYHEM_DOMAIN/$MAYHEM_PROJECT/$MAYHEM_TARGET/testsuite.tar
+  - file://mayhem/fuzz_dag/testsuite
+cmds:
+  - cmd: /mayhem/fuzz_dag
+    libfuzzer: true
